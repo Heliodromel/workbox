@@ -31,6 +31,8 @@ const sanitizeConfig = require('./lib/sanitize-config');
 const stringifyManifest = require('./lib/stringify-manifest');
 const warnAboutConfig = require('./lib/warn-about-config');
 
+const flatten = array => Object.values(array).reduce((acc, val) => acc = [...acc, ...val], [])
+
 /**
  * This class supports taking an existing service worker file which already
  * uses Workbox, and injecting a reference to a [precache manifest]() into it,
@@ -59,6 +61,9 @@ class InjectManifest {
       // provided here. (In GenerateSW, that's not available.)
       swDest: path.basename(config.swSrc),
     }, config);
+
+    this._manifestHash = null;
+    this._allEntries = {};
   }
 
   /**
@@ -67,7 +72,7 @@ class InjectManifest {
    * derived from compiler.inputFileSystem.
    * @private
    */
-  async handleEmit(compilation, readFile) {
+  async handleEmit(compilation, readFile, runId) {
     const configWarning = warnAboutConfig(this.config);
     if (configWarning) {
       compilation.warnings.push(configWarning);
@@ -100,12 +105,13 @@ class InjectManifest {
       entries = entries.concat(manifestEntries);
     }
 
-    const manifestString = stringifyManifest(entries);
+    this._allEntries[runId] = [...(this._allEntries[runId] || []), ...entries];
+    const manifestString = stringifyManifest(flatten(this._allEntries));
     const manifestAsset = convertStringToAsset(manifestString);
-    const manifestHash = getAssetHash(manifestAsset);
+    const manifestHash = this._manifestHash = this._manifestHash || getAssetHash(manifestAsset);
 
     const manifestFilename = formatManifestFilename(
-      this.config.precacheManifestFilename, manifestHash);
+      this.config.precacheManifestFilename, manifestHashInMemory);
 
     const pathToManifestFile = relativeToOutputPath(
       compilation, path.join(this.config.importsDirectory, manifestFilename));
@@ -161,10 +167,17 @@ ${originalSWString}
       .bind(compiler.inputFileSystem);
     if ('hooks' in compiler) {
       // We're in webpack 4+.
+
+      const runId = Object.keys(compiler.options.entry)[0];
       compiler.hooks.emit.tapPromise(
         this.constructor.name,
-        (compilation) => this.handleEmit(compilation, readFile)
+        (compilation) => this.handleEmit(compilation, readFile, runId)
       );
+      compiler.hooks.watchRun.tap(this.constructor.name, () => {
+        this._allEntries[runId] = [];
+        this._manifestHash = null;
+      });
+
     } else {
       // We're in webpack 2 or 3.
       compiler.plugin('emit', (compilation, callback) => {
